@@ -1,16 +1,15 @@
-/* Vault — encrypted storage locked by a key file that lives on the pendrive.
+/* Vault — encrypted storage locked by a PIN.
  *
- *  key file (on pendrive)  = random 256-bit secret + vault id
- *  optional PIN            = second factor mixed into the key (PBKDF2)
- *  data on phone           = AES-256-GCM ciphertext in IndexedDB
+ *  PIN (4-8 digits)  -> PBKDF2 (200,000 rounds) -> HKDF -> AES-256-GCM key
+ *  data on phone     = ciphertext in IndexedDB, unreadable without the PIN
  *
- * Without the key file (and PIN, if set) the stored data cannot be read.
+ * There is no separate key file: the PIN is the only thing that unlocks the
+ * vault, so a forgotten PIN means starting over from the last Excel backup.
  */
 (function (root) {
   'use strict';
   const enc = new TextEncoder();
   const dec = new TextDecoder();
-  const KEYFILE_APP = 'ledger-vault';
 
   // ---------- small helpers ----------
   function b64e(u8) { let s = ''; for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); return btoa(s); }
@@ -62,18 +61,12 @@
   };
 
   // ---------- crypto ----------
-  async function deriveKey(secret, pin, salt) {
-    let material = secret;
-    if (pin) {
-      const pk = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveBits']);
-      const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, pk, 256));
-      material = new Uint8Array(secret.length + bits.length);
-      material.set(secret);
-      material.set(bits, secret.length);
-    }
-    const hk = await crypto.subtle.importKey('raw', material, 'HKDF', false, ['deriveKey']);
+  async function deriveKey(pin, salt) {
+    const pk = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, pk, 256));
+    const hk = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey']);
     return crypto.subtle.deriveKey(
-      { name: 'HKDF', hash: 'SHA-256', salt, info: enc.encode('ledger-vault-v1') },
+      { name: 'HKDF', hash: 'SHA-256', salt, info: enc.encode('ledger-vault-pin-v1') },
       hk, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
   async function seal(key, u8) {
@@ -83,30 +76,12 @@
   }
   async function open(key, rec) {
     try { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: rec.iv }, key, rec.ct)); }
-    catch (e) { throw err('BAD_KEY', 'Wrong key file or PIN'); }
-  }
-
-  // ---------- key file ----------
-  function newKeyMaterial() { return { vaultId: b64e(rand(6)).replace(/[^A-Za-z0-9]/g, 'x'), secret: rand(32) }; }
-  function keyFileText(vaultId, secret) {
-    return JSON.stringify({ app: KEYFILE_APP, v: 1, vaultId, key: b64e(secret),
-      note: 'Secret key for the Ledger app. Keep this file ONLY on the pendrive.' }, null, 2);
-  }
-  function parseKeyFile(text) {
-    let o;
-    try { o = JSON.parse(text); } catch (e) { throw err('BAD_FILE', 'That is not a key file'); }
-    if (!o || o.app !== KEYFILE_APP || !o.vaultId || !o.key) throw err('BAD_FILE', 'That is not a key file');
-    const secret = b64d(o.key);
-    if (secret.length !== 32) throw err('BAD_FILE', 'Key file is damaged');
-    return { vaultId: o.vaultId, secret };
+    catch (e) { throw err('BAD_KEY', 'Wrong PIN'); }
   }
 
   // ---------- session (an unlocked vault) ----------
-  function makeSession(key, secret, meta) {
+  function makeSession(key, meta) {
     const s = {
-      vaultId: meta.vaultId,
-      hasPin: !!meta.pin,
-      secret, // kept in memory only, so a spare key pendrive can be made while unlocked
       async saveDb(db) {
         const { iv, ct } = await seal(key, enc.encode(JSON.stringify(db)));
         await idb.put('vault', 'db', { iv, ct });
@@ -127,9 +102,10 @@
       },
       delPhoto(id) { return idb.del('photos', id); },
       async changePin(db, newPin) {
-        // Re-encrypt everything under the new key in ONE transaction so a crash cannot half-convert.
+        // Re-encrypt everything under the new PIN in ONE transaction so a crash cannot half-convert.
+        if (!/^\d{4,8}$/.test(newPin)) throw err('BAD_PIN', 'The PIN must be 4 to 8 digits');
         const salt = rand(16);
-        const newKey = await deriveKey(secret, newPin || null, salt);
+        const newKey = await deriveKey(newPin, salt);
         const ops = [];
         const dbSeal = await seal(newKey, enc.encode(JSON.stringify(db)));
         ops.push({ op: 'put', store: 'vault', key: 'db', val: dbSeal });
@@ -139,41 +115,38 @@
           const s2 = await seal(newKey, plain);
           ops.push({ op: 'put', store: 'photos', key: id, val: { iv: s2.iv, ct: s2.ct, type: rec.type } });
         }
-        const newMeta = { vaultId: meta.vaultId, salt: b64e(salt), pin: !!newPin, v: 1, created: meta.created };
+        const newMeta = { salt: b64e(salt), v: 1, created: meta.created };
         ops.push({ op: 'put', store: 'meta', key: 'meta', val: newMeta });
         await idb.batch(ops);
-        key = newKey; meta = newMeta; s.hasPin = !!newPin;
+        key = newKey; meta = newMeta;
       },
     };
     return s;
   }
 
   const Vault = {
-    keyFileText, parseKeyFile, newKeyMaterial,
     async meta() { return idb.get('meta', 'meta'); },
     async exists() { return !!(await idb.get('meta', 'meta')); },
 
-    async create({ vaultId, secret, pin, db }) {
+    async create({ pin, db }) {
+      if (!/^\d{4,8}$/.test(pin)) throw err('BAD_PIN', 'The PIN must be 4 to 8 digits');
       const salt = rand(16);
-      const key = await deriveKey(secret, pin || null, salt);
-      const meta = { vaultId, salt: b64e(salt), pin: !!pin, v: 1, created: new Date().toISOString() };
+      const key = await deriveKey(pin, salt);
+      const meta = { salt: b64e(salt), v: 1, created: new Date().toISOString() };
       const { iv, ct } = await seal(key, enc.encode(JSON.stringify(db)));
       await idb.batch([
         { op: 'put', store: 'vault', key: 'db', val: { iv, ct } },
         { op: 'put', store: 'meta', key: 'meta', val: meta },
       ]);
-      return makeSession(key, secret, meta);
+      return makeSession(key, meta);
     },
 
-    async unlock(keyText, pin) {
+    async unlock(pin) {
       const meta = await idb.get('meta', 'meta');
       if (!meta) throw err('NO_VAULT', 'No vault on this phone');
-      const kf = Vault.parseKeyFile(keyText);
-      if (kf.vaultId !== meta.vaultId) throw err('WRONG_VAULT', 'This key file belongs to a different vault');
-      if (meta.pin && !pin) throw err('PIN_NEEDED', 'Enter your PIN first');
-      const key = await deriveKey(kf.secret, meta.pin ? pin : null, b64d(meta.salt));
-      const session = makeSession(key, kf.secret, meta);
-      await session.loadDb(); // throws BAD_KEY if the PIN/key is wrong
+      const key = await deriveKey(pin, b64d(meta.salt));
+      const session = makeSession(key, meta);
+      await session.loadDb(); // throws BAD_KEY if the PIN is wrong
       return session;
     },
 

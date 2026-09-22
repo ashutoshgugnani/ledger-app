@@ -1,8 +1,8 @@
 /* Service worker — makes the app work offline. Bump VERSION whenever any file changes. */
-const VERSION = 'ledger-v1';
+const VERSION = 'ledger-v2';
 const FILES = [
-  './', 'index.html', 'style.css', 'app.js', 'engine.js', 'vault.js', 'backup.js',
-  'libs/xlsx.mini.min.js', 'manifest.webmanifest',
+  './', 'index.html', 'style.css', 'app.js', 'engine.js', 'vault.js', 'backup.js', 'statement.js', 'dashboard.js',
+  'libs/xlsx.mini.min.js', 'libs/jspdf.umd.min.js', 'libs/jspdf.plugin.autotable.min.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

@@ -1,13 +1,13 @@
-/* Ledger — private lending records, unlocked by a pendrive key file. */
+/* Ledger — private lending records, locked with a PIN. */
 (function () {
   'use strict';
-  const E = window.Engine, V = window.Vault, B = window.Backup;
+  const E = window.Engine, V = window.Vault, B = window.Backup, D = window.Dashboard, ST = window.Statement;
   const $ = (s, r = document) => r.querySelector(s);
   const appEl = $('#app'), sheetRoot = $('#sheet-root');
 
   const S = {
-    session: null, db: null, meta: null,
-    mode: 'boot',              // boot | welcome | setup1 | setup2 | setup3 | lock | app
+    session: null, db: null,
+    mode: 'boot',              // boot | welcome | setup | lock | app
     view: { name: 'home' }, stack: [], tab: 'borrowers',
     q: '', loanFilter: 'active', lockMsg: '', setup: null, reveal: false,
   };
@@ -22,6 +22,7 @@
   const uid = () => Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => b.toString(16).padStart(2, '0')).join('');
   const initials = (n) => (n || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
   const rateText = (l) => Number(l.rate) + '% per ' + (l.rateUnit === 'year' ? 'year' : 'month');
+  const safeName = (s) => s.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 24) || 'x';
   const borrower = (id) => S.db.borrowers.find((b) => b.id === id);
   const loan = (id) => S.db.loans.find((l) => l.id === id);
   const today = () => E.todayStr();
@@ -37,11 +38,16 @@
     S.db.loans.forEach((l) => m.set(l.id, E.computeLoan(l, S.db.payments, t)));
     return m;
   }
+  function activeLoansFor(borrowerId, calc) {
+    calc = calc || calcAll();
+    return S.db.loans.filter((l) => l.borrowerId === borrowerId && !calc.get(l.id).settled);
+  }
 
   const ICON = {
     lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor"/></svg>',
     people: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14a6.5 6.5 0 0 1 3.5 6"/></svg>',
     loans: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2.5"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>',
+    chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M12 20V4M20 20v-7"/><path d="M2.5 20h19" stroke-linecap="round"/></svg>',
     gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
 
@@ -109,6 +115,7 @@
     else { S.view = { name: 'home' }; S.stack = []; html = viewHome(); }
     appEl.innerHTML = html;
     hydratePhotos(appEl, pageUrls);
+    if (S.view.name === 'home' && S.tab === 'dashboard' && D) D.mount(appEl);
     if (toTop) window.scrollTo(0, 0);
   }
 
@@ -120,7 +127,7 @@
       appEl.innerHTML = `<div class="center">
         <div class="lockicon">${ICON.lock}</div>
         <h1>Ledger</h1>
-        <p>Your private lending records. The app opens only when the special pendrive is plugged in.</p>
+        <p>Your private lending records, locked with a PIN.</p>
         <div class="btn-row">
           <button class="btn" data-act="welcome-new">Set up a new ledger</button>
           <label class="btn ghost filepick">Restore from an Excel backup<input type="file" id="welcome-restore"></label>
@@ -128,56 +135,34 @@
         <div class="err" id="err"></div></div>`;
       return;
     }
-    if (m === 'setup1') {
-      const st = S.setup;
+    if (m === 'setup') {
+      const restoring = !!(S.setup && S.setup.initialDb);
       appEl.innerHTML = `<div class="center">
-        <h1>Choose your lock</h1>
-        <p>The pendrive is the key. You can also add a PIN so that the pendrive alone is not enough.</p>
-        <div class="seg"><button class="${st.usePin ? '' : 'on'}" data-act="pin-mode" data-v="0">Pendrive only</button><button class="${st.usePin ? 'on' : ''}" data-act="pin-mode" data-v="1">Pendrive + PIN</button></div>
-        ${st.usePin ? `<label class="f"><span>PIN (4 to 8 digits)</span><input id="pin1" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
-        <label class="f"><span>Repeat PIN</span><input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
-        <div class="hint">If the PIN is forgotten the data cannot be opened. Only the Excel backup will help.</div>` : ''}
-        <div class="err" id="err"></div>
-        <div class="btn-row"><button class="btn" data-act="setup-create">Create key file</button>
-        <button class="btn ghost" data-act="setup-cancel">Cancel</button></div></div>`;
-      return;
-    }
-    if (m === 'setup2') {
-      appEl.innerHTML = `<div class="center">
-        <h1>Save the key on the pendrive</h1>
-        <ol class="steps">
-          <li>Plug the pendrive into the iPhone.</li>
-          <li>Tap the green button. Choose <b>Save to Files</b>.</li>
-          <li>Under <b>Locations</b> pick the pendrive, then tap <b>Save</b>.</li>
-        </ol>
-        <p>Do not keep any other copy of this file on the phone. This is the only key.</p>
-        <div class="btn-row">
-          <button class="btn" data-act="setup-save-key">Save key file to pendrive</button>
-          <button class="btn secondary" data-act="setup-next">${S.setup.saved ? 'Next: check the pendrive' : 'I have saved it'}</button>
-          <button class="btn ghost" data-act="setup-back">Back</button></div></div>`;
-      return;
-    }
-    if (m === 'setup3') {
-      appEl.innerHTML = `<div class="center">
-        <h1>Check the pendrive</h1>
-        <p>Now pick the key file from the pendrive, exactly as you will each time you open the app. This proves it was saved properly.</p>
-        <div class="err" id="err"></div>
-        <div class="btn-row">
-          <label class="btn filepick">Choose key file from pendrive<input type="file" id="verify-key"></label>
-          <button class="btn ghost" data-act="setup-save-key">Save the key file again</button>
-          <button class="btn ghost" data-act="setup-back">Back</button></div></div>`;
+        <div class="lockicon">${ICON.lock}</div>
+        <h1>Create a PIN</h1>
+        <p>${restoring ? 'Your backup is ready to restore. Choose a PIN to protect it on this phone.' : 'This PIN locks Ledger. Anyone who knows it, with this phone in hand, can open your records — so keep it private and don’t reuse a PIN from something else.'}</p>
+        <form id="setupform">
+          <label class="f"><span>PIN (4 to 8 digits)</span><input id="pin1" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
+          <label class="f"><span>Repeat PIN</span><input id="pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
+          <div class="hint">If the PIN is forgotten, the data on this phone can't be opened — only an Excel backup can bring the records back.</div>
+          <div class="err" id="err"></div>
+          <div class="btn-row"><button class="btn" type="submit">Create PIN</button>
+          <button class="btn ghost" type="button" data-act="setup-cancel">Cancel</button></div>
+        </form></div>`;
       return;
     }
     // lock
-    const hasPin = !!(S.meta && S.meta.pin);
     appEl.innerHTML = `<div class="center">
       <div class="lockicon">${ICON.lock}</div>
       <h1>Ledger is locked</h1>
-      <p>${esc(S.lockMsg) || 'Plug in the pendrive, then choose the key file from it.'}</p>
-      ${hasPin ? '<label class="f"><span>PIN</span><input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>' : ''}
-      <div class="err" id="err"></div>
-      <div class="btn-row"><label class="btn filepick">Unlock with pendrive<input type="file" id="keyfile"></label></div>
-      <button class="linklike" style="margin-top:14px;text-align:left;padding:0" data-act="lost-pendrive">Lost the pendrive?</button></div>`;
+      <p>${esc(S.lockMsg) || 'Enter your PIN to open Ledger.'}</p>
+      <form id="lockform">
+        <label class="f"><span>PIN</span><input id="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
+        <div class="err" id="err"></div>
+        <div class="btn-row"><button class="btn" type="submit">Unlock</button></div>
+      </form>
+      <button class="linklike" style="margin-top:14px;text-align:left;padding:0" data-act="forgot-pin">Forgot your PIN?</button></div>`;
+    const pinEl = $('#pin'); if (pinEl) pinEl.focus();
   }
   const showErr = (m) => { const e = $('#err'); if (e) e.textContent = m; };
 
@@ -186,51 +171,52 @@
   function noteFail() { try { const o = JSON.parse(localStorage.getItem('lg_f') || '{}'); const n = (o.n || 0) + 1; localStorage.setItem('lg_f', JSON.stringify({ n, until: n >= 5 ? Date.now() + Math.min(600, 15 * Math.pow(2, n - 5)) * 1000 : 0 })); } catch (e) { /* ignore */ } }
   function clearFails() { try { localStorage.removeItem('lg_f'); } catch (e) { /* ignore */ } }
 
-  async function tryUnlock(file) {
+  async function tryUnlock() {
     const left = throttleLeft();
     if (left > 0) { showErr('Too many wrong tries. Please wait ' + Math.ceil(left / 1000) + ' seconds.'); return; }
     const pin = ($('#pin') || {}).value || '';
+    if (!/^\d{4,8}$/.test(pin)) { showErr('Enter your PIN.'); return; }
     try {
-      const session = await V.unlock(await file.text(), pin);
+      const session = await V.unlock(pin);
       S.session = session; S.db = normDb(await session.loadDb());
       clearFails(); S.mode = 'app'; S.view = { name: 'home' }; S.stack = []; S.tab = 'borrowers'; S.lockMsg = ''; lastActive = Date.now();
       render(true);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     } catch (e) {
       if (e.code === 'BAD_KEY') noteFail();
-      showErr(e.code === 'BAD_KEY' ? (S.meta && S.meta.pin ? 'Wrong key file or PIN.' : 'Wrong key file.') : e.message || 'Could not unlock');
+      showErr(e.code === 'BAD_KEY' ? 'Wrong PIN.' : e.message || 'Could not unlock');
     }
   }
   function lock(msg) {
     S.session = null; S.db = null; S.view = { name: 'home' }; S.stack = []; S.reveal = false; S.q = ''; F = null;
     closeSheet(); closeViewer(); $('#toast').hidden = true; S.mode = 'lock'; S.lockMsg = msg || '';
-    V.meta().then((m) => { S.meta = m; render(); });
+    render();
   }
 
   /* ---- first-time setup ---- */
-  async function finishSetup(file) {
+  async function createVault() {
+    const a = $('#pin1').value, b = $('#pin2').value;
+    if (!/^\d{4,8}$/.test(a)) return showErr('The PIN must be 4 to 8 digits.');
+    if (a !== b) return showErr('The two PINs do not match.');
     try {
-      const kf = V.parseKeyFile(await file.text());
-      const st = S.setup;
-      const same = kf.vaultId === st.vaultId && kf.secret.length === st.secret.length && kf.secret.every((b, i) => b === st.secret[i]);
-      if (!same) { showErr('That is a different key file. Pick the one you just saved.'); return; }
-      S.session = await V.create({ vaultId: st.vaultId, secret: st.secret, pin: st.usePin ? st.pin : null, db: st.initialDb || blankDb() });
-      S.db = normDb(await S.session.loadDb()); S.meta = await V.meta(); S.setup = null;
+      S.session = await V.create({ pin: a, db: (S.setup && S.setup.initialDb) || blankDb() });
+      S.db = normDb(await S.session.loadDb()); S.setup = null;
       S.mode = 'app'; S.view = { name: 'home' }; S.stack = []; S.tab = 'borrowers'; lastActive = Date.now();
       render(true); toast('Ledger is ready');
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    } catch (e) { showErr(e.message || 'Could not read that file'); }
+    } catch (e) { showErr(e.message || 'Could not create the PIN'); }
   }
 
   /* ======================= MAIN VIEWS ======================= */
   function tabbar() {
     const t = (id, label, ic) => `<button class="${S.tab === id ? 'on' : ''}" data-act="tab" data-tab="${id}">${ICON[ic]}<span>${label}</span></button>`;
-    return `<nav class="tabbar">${t('borrowers', 'Borrowers', 'people')}${t('loans', 'Loans', 'loans')}${t('settings', 'Settings', 'gear')}</nav>`;
+    return `<nav class="tabbar">${t('borrowers', 'Borrowers', 'people')}${t('loans', 'Loans', 'loans')}${t('dashboard', 'Dashboard', 'chart')}${t('settings', 'Settings', 'gear')}</nav>`;
   }
   function viewHome() {
     let inner;
     if (S.tab === 'borrowers') inner = tabBorrowers();
     else if (S.tab === 'loans') inner = tabLoans();
+    else if (S.tab === 'dashboard') inner = tabDashboard();
     else inner = tabSettings();
     return inner + tabbar();
   }
@@ -280,7 +266,8 @@
           <div class="big">${inr(out)}</div>
           <div class="stats"><div class="stat"><div class="k">Lent</div><div class="v">${inr(lent, 0)}</div></div>
           <div class="stat"><div class="k">Received</div><div class="v">${inr(paid, 0)}</div></div>
-          <div class="stat"><div class="k">Interest so far</div><div class="v">${inr(interest, 0)}</div></div></div></div>
+          <div class="stat"><div class="k">Interest so far</div><div class="v">${inr(interest, 0)}</div></div></div>
+          <button class="hero-action" data-act="record-payment">+ Record a payment</button></div>
         ${banner}
         <input class="search" id="q" type="search" placeholder="Search name or phone" value="${esc(S.q)}" autocomplete="off">
         <div class="list" id="blist">${borrowerRows()}</div>
@@ -308,26 +295,30 @@
       <div class="list">${list}</div></div></div>`;
   }
 
+  /* ---- Dashboard tab ---- */
+  function tabDashboard() {
+    return `<div class="screen">${topbar('Dashboard')}${D.render(S.db, E)}</div>`;
+  }
+
   /* ---- Settings tab ---- */
   function tabSettings() {
     const st = S.db.settings; const days = backupDays();
     const opt = (v, cur, label) => `<option value="${v}" ${Number(cur) === v ? 'selected' : ''}>${label}</option>`;
     return `<div class="screen">${topbar('Settings')}<div class="wrap">
       <div class="card"><h2>Backup</h2>
-        <div class="hint" style="margin:0 0 10px">${days === null ? 'No backup made yet.' : 'Last backup: ' + (days === 0 ? 'today' : days + ' day' + (days > 1 ? 's' : '') + ' ago') + '.'} The Excel file contains everything except ID photos. It is not password protected, so save it on the pendrive.</div>
+        <div class="hint" style="margin:0 0 10px">${days === null ? 'No backup made yet.' : 'Last backup: ' + (days === 0 ? 'today' : days + ' day' + (days > 1 ? 's' : '') + ' ago') + '.'} The Excel file contains everything except ID photos, and is not password protected — keep it somewhere private.</div>
         <div class="btn-row"><button class="btn" data-act="export">Download Excel backup</button>
         <button class="btn secondary" data-act="export-photos">Back up ID photos</button>
         <label class="btn ghost filepick">Restore from Excel<input type="file" id="restore-xlsx"></label>
         <label class="btn ghost filepick">Restore ID photos<input type="file" id="restore-photos" accept="image/*" multiple></label></div></div>
       <div class="card"><h2>Security</h2>
-        <div class="btn-row"><button class="btn secondary" data-act="change-pin">${S.session.hasPin ? 'Change or remove PIN' : 'Add a PIN'}</button>
-        <button class="btn secondary" data-act="save-spare-key">Make a spare key pendrive</button>
+        <div class="btn-row"><button class="btn secondary" data-act="change-pin">Change PIN</button>
         <button class="btn ghost" data-act="lock">Lock now</button></div>
         <label class="f"><span>Lock when the app is left for</span><select id="set-grace">${opt(0, st.lockGraceSec, 'Right away')}${opt(30, st.lockGraceSec, '30 seconds')}${opt(120, st.lockGraceSec, '2 minutes')}${opt(300, st.lockGraceSec, '5 minutes')}</select></label>
         <label class="f"><span>Lock after no activity for</span><select id="set-idle">${opt(2, st.idleMin, '2 minutes')}${opt(5, st.idleMin, '5 minutes')}${opt(10, st.idleMin, '10 minutes')}</select></label></div>
       <div class="card"><h2>Danger zone</h2>
         <div class="btn-row"><button class="btn danger" data-act="erase">Erase everything on this phone</button></div>
-        <div class="hint">Ledger v1.0 · ${S.db.borrowers.length} borrowers · ${S.db.loans.length} loans · ${S.db.payments.length} payments</div></div>
+        <div class="hint">Ledger v2.0 · ${S.db.borrowers.length} borrowers · ${S.db.loans.length} loans · ${S.db.payments.length} payments</div></div>
     </div></div>`;
   }
 
@@ -360,7 +351,8 @@
           ${thumbs ? `<div class="thumbs">${thumbs}</div>` : '<div class="hint">No ID photo added.</div>'}</div>
         <h2 style="font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-2);margin:20px 4px 0">Loans</h2>
         <div class="list">${loanRows}</div>
-        <div class="btn-row"><button class="btn" data-act="add-loan" data-id="${b.id}">+ New loan</button></div>
+        <div class="btn-row"><button class="btn" data-act="add-loan" data-id="${b.id}">+ New loan</button>
+        ${ls.length ? `<button class="btn secondary" data-act="borrower-statement" data-id="${b.id}">Share statement (PDF)</button>` : ''}</div>
       </div></div>`;
   }
 
@@ -563,40 +555,67 @@
     await persist(); closeSheet(); render(); toast('Deleted');
   }
 
+  /* ---- record-payment quick picker (from the Borrowers tab) ---- */
+  function sheetPickBorrowerForPayment() {
+    const calc = calcAll();
+    const rows = S.db.borrowers.map((b) => {
+      const ls = activeLoansFor(b.id, calc);
+      if (!ls.length) return null;
+      const owed = ls.reduce((s, l) => s + calc.get(l.id).outstanding, 0);
+      return { b, ls, owed };
+    }).filter(Boolean).sort((x, y) => y.owed - x.owed);
+    if (!rows.length) { toast('No active loans yet — add a borrower and a loan first.'); return; }
+    F = { kind: 'pick-payment' };
+    openSheet(`<h2>Record a payment</h2>
+      <p class="hint" style="margin:0 0 10px">Who paid?</p>
+      <div class="list">${rows.map(({ b, ls, owed }) => `
+        <button class="row" data-act="pick-borrower-pay" data-id="${b.id}">
+          <div class="avatar">${esc(initials(b.name))}</div>
+          <div class="main"><div class="t">${esc(b.name)}</div><div class="s">${ls.length} active loan${ls.length > 1 ? 's' : ''}</div></div>
+          <div class="amt">${inr(owed, 0)}<small>owed</small></div><span class="chev">›</span></button>`).join('')}</div>
+      <div class="btn-row"><button class="btn ghost" data-act="close-sheet">Cancel</button></div>`);
+  }
+  function sheetPickLoanForPayment(borrowerId) {
+    const b = borrower(borrowerId); const calc = calcAll();
+    const ls = activeLoansFor(borrowerId, calc);
+    F = { kind: 'pick-payment-loan' };
+    openSheet(`<h2>${esc(b.name)}</h2>
+      <p class="hint" style="margin:0 0 10px">Which loan is this payment for?</p>
+      <div class="list">${ls.map((l) => { const c = calc.get(l.id); return `
+        <button class="row" data-act="pick-loan-pay" data-id="${l.id}">
+          <div class="main"><div class="t">${inr(Number(l.principal), 0)} · ${esc(rateText(l))}</div><div class="s">Since ${fdate(l.startDate)}</div></div>
+          <div class="amt">${inr(c.outstanding, 0)}<small>owed</small></div><span class="chev">›</span></button>`; }).join('')}</div>
+      <div class="btn-row"><button class="btn ghost" data-act="close-sheet">Cancel</button></div>`);
+  }
+
   /* ---- PIN ---- */
   function sheetPin() {
     F = { kind: 'pin' };
-    openSheet(`<h2>${S.session.hasPin ? 'Change or remove PIN' : 'Add a PIN'}</h2>
-      <p class="hint" style="margin:0 0 4px">A PIN is asked together with the pendrive. If the PIN is forgotten, only the Excel backup can bring the data back.</p>
+    openSheet(`<h2>Change PIN</h2>
+      <p class="hint" style="margin:0 0 4px">If the new PIN is forgotten, only an Excel backup can bring the data back.</p>
       <label class="f"><span>New PIN (4 to 8 digits)</span><input id="n-pin1" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
       <label class="f"><span>Repeat new PIN</span><input id="n-pin2" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off"></label>
       <div class="err" id="ferr"></div>
       <div class="btn-row"><button class="btn" data-act="save-pin">Save PIN</button>
-        ${S.session.hasPin ? '<button class="btn danger" data-act="remove-pin">Remove PIN</button>' : ''}
         <button class="btn ghost" data-act="close-sheet">Cancel</button></div>`);
   }
-  async function savePin(remove) {
-    let pin = null;
-    if (!remove) {
-      const a = $('#n-pin1').value, b = $('#n-pin2').value;
-      if (!/^\d{4,8}$/.test(a)) return fieldErr('The PIN must be 4 to 8 digits.');
-      if (a !== b) return fieldErr('The two PINs do not match.');
-      pin = a;
-    }
-    try { await S.session.changePin(S.db, pin); S.meta = await V.meta(); closeSheet(); render(); toast(remove ? 'PIN removed' : 'PIN saved'); }
+  async function savePin() {
+    const a = $('#n-pin1').value, b = $('#n-pin2').value;
+    if (!/^\d{4,8}$/.test(a)) return fieldErr('The PIN must be 4 to 8 digits.');
+    if (a !== b) return fieldErr('The two PINs do not match.');
+    try { await S.session.changePin(S.db, a); closeSheet(); render(); toast('PIN changed'); }
     catch (e) { fieldErr('Could not change the PIN: ' + e.message); }
   }
 
-  /* ======================= BACKUP & RESTORE ======================= */
+  /* ======================= BACKUP, RESTORE & STATEMENTS ======================= */
   async function doExport() {
     try {
       const buf = B.build(S.db, E);
       const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const ok = await saveFile(blob, 'Ledger-Backup-' + today() + '.xlsx');
-      if (ok) { S.db.lastBackupAt = new Date().toISOString(); await persist(); render(); toast('Backup ready. Save it on the pendrive.'); }
+      if (ok) { S.db.lastBackupAt = new Date().toISOString(); await persist(); render(); toast('Backup ready to share or save.'); }
     } catch (e) { toast('Backup failed: ' + e.message); }
   }
-  const safeName = (s) => s.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 24) || 'x';
   async function doPhotoExport() {
     const files = [];
     for (const b of S.db.borrowers) {
@@ -609,7 +628,7 @@
     if (!files.length) { toast('There are no ID photos to back up.'); return; }
     suspendUntil = Date.now() + SUSPEND_MS;
     try {
-      if (navigator.canShare && navigator.canShare({ files })) { await navigator.share({ files, title: 'ID photos' }); toast('Photos shared. Save them on the pendrive.'); }
+      if (navigator.canShare && navigator.canShare({ files })) { await navigator.share({ files, title: 'ID photos' }); toast('Photos shared.'); }
       else { for (const f of files) await saveFile(f, f.name); }
     } catch (e) { if (!e || e.name !== 'AbortError') toast('Could not share the photos'); }
     finally { settleSuspend(); }
@@ -644,6 +663,17 @@
     await persist(); render();
     toast(ok + ' photo' + (ok === 1 ? '' : 's') + ' restored' + (skipped ? ', ' + skipped + ' skipped' : ''));
   }
+  async function doStatement(borrowerId) {
+    const b = borrower(borrowerId);
+    const ls = S.db.loans.filter((l) => l.borrowerId === borrowerId).sort((x, y) => x.startDate.localeCompare(y.startDate));
+    if (!ls.length) { toast('Add a loan first.'); return; }
+    try {
+      const doc = ST.buildBorrowerStatement(b, ls, S.db.payments);
+      const blob = doc.output('blob');
+      const ok = await saveFile(blob, 'Statement-' + safeName(b.name) + '-' + today() + '.pdf');
+      if (ok) toast('Statement ready to share or save.');
+    } catch (e) { toast('Could not build the statement: ' + (e.message || e)); }
+  }
 
   /* ---- viewer ---- */
   let viewerUrl = null;
@@ -655,6 +685,11 @@
   function closeViewer() { const v = $('#viewer'); v.hidden = true; v.innerHTML = ''; if (viewerUrl) { URL.revokeObjectURL(viewerUrl); viewerUrl = null; } }
 
   /* ======================= EVENTS ======================= */
+  document.addEventListener('submit', async (e) => {
+    if (e.target && e.target.id === 'lockform') { e.preventDefault(); await tryUnlock(); }
+    else if (e.target && e.target.id === 'setupform') { e.preventDefault(); await createVault(); }
+  });
+
   document.addEventListener('click', async (e) => {
     if (e.target.closest('label.filepick')) suspendUntil = Date.now() + SUSPEND_MS;
     const el = e.target.closest('[data-act]'); if (!el) return;
@@ -662,30 +697,11 @@
     lastActive = Date.now();
     switch (act) {
       /* setup / lock */
-      case 'welcome-new': S.setup = { usePin: false }; S.mode = 'setup1'; render(); break;
-      case 'setup-cancel': S.setup = null; S.mode = S.meta ? 'lock' : 'welcome'; render(); break;
-      case 'pin-mode': S.setup.usePin = el.dataset.v === '1'; render(); break;
-      case 'setup-create': {
-        const st = S.setup;
-        if (st.usePin) {
-          const a = $('#pin1').value, b = $('#pin2').value;
-          if (!/^\d{4,8}$/.test(a)) return showErr('The PIN must be 4 to 8 digits.');
-          if (a !== b) return showErr('The two PINs do not match.');
-          st.pin = a;
-        }
-        Object.assign(st, V.newKeyMaterial(), { saved: false }); S.mode = 'setup2'; render(); break;
-      }
-      case 'setup-save-key': {
-        const st = S.setup;
-        const blob = new Blob([V.keyFileText(st.vaultId, st.secret)], { type: 'application/json' });
-        if (await saveFile(blob, 'LedgerKey-' + st.vaultId + '.json')) { st.saved = true; if (S.mode === 'setup2') render(); }
-        break;
-      }
-      case 'setup-next': S.mode = 'setup3'; render(); break;
-      case 'setup-back': S.mode = S.mode === 'setup3' ? 'setup2' : 'setup1'; render(); break;
-      case 'lost-pendrive':
-        if (confirm('Without the pendrive the data on this phone cannot be opened.\n\nIf you have an Excel backup you can erase this vault and restore from the backup with a new pendrive.\n\nErase the vault on this phone now?')) {
-          await V.wipe(); S.meta = null; S.mode = 'welcome'; render();
+      case 'welcome-new': S.setup = null; S.mode = 'setup'; render(); break;
+      case 'setup-cancel': S.setup = null; S.mode = 'welcome'; render(); break;
+      case 'forgot-pin':
+        if (confirm('Without the PIN the data on this phone cannot be opened.\n\nIf you have an Excel backup, you can erase this app’s data and restore from that backup with a new PIN.\n\nErase the data on this phone now?')) {
+          await V.wipe(); S.mode = 'welcome'; render();
         }
         break;
       /* navigation */
@@ -711,6 +727,13 @@
       case 'save-payment': await savePayment(); break;
       case 'del-payment': await deletePayment(); break;
       case 'pay-full': { const d = $('#p-date').value; if (d) { $('#p-amt').value = Math.max(0, owedOn(d)).toFixed(2); } break; }
+      case 'record-payment': sheetPickBorrowerForPayment(); break;
+      case 'pick-borrower-pay': {
+        const ls = activeLoansFor(id); closeSheet();
+        if (ls.length === 1) sheetPayment(ls[0].id); else sheetPickLoanForPayment(id);
+        break;
+      }
+      case 'pick-loan-pay': closeSheet(); sheetPayment(id); break;
       case 'rm-photo': {
         const p = F.photos.find((x) => x.id === id); if (!p) break;
         if (p.url) URL.revokeObjectURL(p.url); else F.removed.push(p.id);
@@ -723,17 +746,12 @@
       /* settings */
       case 'export': await doExport(); break;
       case 'export-photos': await doPhotoExport(); break;
+      case 'borrower-statement': await doStatement(id); break;
       case 'change-pin': sheetPin(); break;
-      case 'save-pin': await savePin(false); break;
-      case 'remove-pin': await savePin(true); break;
-      case 'save-spare-key': {
-        const blob = new Blob([V.keyFileText(S.session.vaultId, S.session.secret)], { type: 'application/json' });
-        if (await saveFile(blob, 'LedgerKey-' + S.session.vaultId + '-spare.json')) toast('Save it on the spare pendrive');
-        break;
-      }
+      case 'save-pin': await savePin(); break;
       case 'erase': {
         const t = prompt('This permanently erases ALL records on this phone.\nType ERASE to confirm.');
-        if (t && t.trim().toUpperCase() === 'ERASE') { await V.wipe(); S.session = null; S.db = null; S.meta = null; S.mode = 'welcome'; closeSheet(); render(); }
+        if (t && t.trim().toUpperCase() === 'ERASE') { await V.wipe(); S.session = null; S.db = null; S.mode = 'welcome'; closeSheet(); render(); }
         break;
       }
       default: break;
@@ -746,17 +764,19 @@
     if (id === 'q') { S.q = e.target.value; const l = $('#blist'); if (l) l.innerHTML = borrowerRows(); }
     else if (id === 'l-amt' || id === 'l-rate') loanHint();
     else if (id === 'p-date') owedHint();
+    else if (id === 'pin' || id === 'pin1' || id === 'n-pin1') { const err = $('#err') || $('#ferr'); if (err) err.textContent = ''; }
   });
 
   document.addEventListener('change', async (e) => {
     const t = e.target, id = t.id; lastActive = Date.now();
     if (t.type === 'file') settleSuspend();
     const file = t.files && t.files[0];
-    if (id === 'keyfile' && file) { await tryUnlock(file); t.value = ''; }
-    else if (id === 'verify-key' && file) { await finishSetup(file); t.value = ''; }
-    else if (id === 'welcome-restore' && file) {
-      try { const r = await readWorkbook(file); S.setup = { usePin: false, initialDb: Object.assign(blankDb(), { borrowers: r.borrowers, loans: r.loans, payments: r.payments }) }; S.mode = 'setup1'; render(); toast('Found ' + r.borrowers.length + ' borrowers. Now create a new key.'); }
-      catch (err) { showErr(err.message); }
+    if (id === 'welcome-restore' && file) {
+      try {
+        const r = await readWorkbook(file);
+        S.setup = { initialDb: Object.assign(blankDb(), { borrowers: r.borrowers, loans: r.loans, payments: r.payments }) };
+        S.mode = 'setup'; render(); toast('Found ' + r.borrowers.length + ' borrowers. Now create a PIN.');
+      } catch (err) { showErr(err.message); }
       t.value = '';
     }
     else if (id === 'restore-xlsx' && file) { await restoreInto(file); t.value = ''; }
@@ -772,7 +792,6 @@
     else if (id === 'asof') { S.view.asOf = t.value || undefined; render(); }
     else if (id === 'set-grace') { S.db.settings.lockGraceSec = Number(t.value); persist(); }
     else if (id === 'set-idle') { S.db.settings.idleMin = Number(t.value); persist(); }
-    else if (id === 'f-idtype') { /* nothing */ }
   });
 
   /* ---- auto-lock ---- */
@@ -781,7 +800,7 @@
     if (document.hidden) { bgAt = Date.now(); return; }
     const away = bgAt ? Date.now() - bgAt : 0; bgAt = null;
     if (Date.now() < suspendUntil) return;
-    if (away >= S.db.settings.lockGraceSec * 1000) lock('Locked because the app was closed. Plug in the pendrive to open it.');
+    if (away >= S.db.settings.lockGraceSec * 1000) lock('Locked because the app was closed. Enter your PIN to open it.');
   });
   ['pointerdown', 'keydown', 'scroll'].forEach((ev) => document.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true }));
   setInterval(() => {
@@ -794,8 +813,7 @@
     render();
     try {
       if (!window.indexedDB || !window.crypto || !crypto.subtle) throw new Error('This browser cannot keep private data safely. Open the app in Safari over https.');
-      S.meta = await V.meta();
-      S.mode = S.meta ? 'lock' : 'welcome';
+      S.mode = (await V.exists()) ? 'lock' : 'welcome';
     } catch (e) {
       appEl.innerHTML = '<div class="center"><h1>Cannot start</h1><p>' + esc(e.message) + '</p></div>'; return;
     }
